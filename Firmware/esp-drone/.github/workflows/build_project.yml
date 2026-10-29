@@ -1,0 +1,55 @@
+name: Build project
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - idf_ver: release-v5.5
+            target: esp32
+            preview: ""
+          - idf_ver: release-v5.5
+            target: esp32s2
+            preview: ""
+          - idf_ver: release-v5.5
+            target: esp32s3
+            preview: ""
+          - idf_ver: release-v5.5
+            target: esp32p4
+            preview: ""
+          - idf_ver: release-v6.1
+            target: esp32
+            preview: ""
+          - idf_ver: release-v6.1
+            target: esp32s2
+            preview: ""
+          - idf_ver: release-v6.1
+            target: esp32s3
+            preview: ""
+          - idf_ver: release-v6.1
+            target: esp32p4
+            preview: ""
+          - idf_ver: release-v6.1
+            target: esp32s31
+            preview: "--preview"
+    runs-on: ubuntu-latest
+    container: espressif/idf:${{ matrix.idf_ver }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+      - name: Build ${{ matrix.target }} with ESP-IDF ${{ matrix.idf_ver }}
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          idf.py ${{ matrix.preview }} \
+            -B build-${{ matrix.target }} \
+            -D IDF_TARGET=${{ matrix.target }} \
+            build

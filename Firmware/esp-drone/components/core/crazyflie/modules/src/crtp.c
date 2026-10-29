@@ -108,6 +108,7 @@ bool crtpTest(void)
 
 void crtpInitTaskQueue(CRTPPort portId)
 {
+  ASSERT(portId >= 0 && portId < CRTP_NBR_OF_PORTS);
   ASSERT(queues[portId] == NULL);
 
   queues[portId] = xQueueCreate(CRTP_RX_QUEUE_SIZE, sizeof(CRTPPacket));
@@ -186,6 +187,8 @@ void crtpRxTask(void *param)
           if (xQueueSend(queues[p.port], &p, 0) == errQUEUE_FULL)
           {
             // We should never drop packet
+            printf("CRTP RX queue full\n");
+            printf("Port: %d\n", p.port);
             ASSERT(0);
           }
         }
@@ -208,7 +211,7 @@ void crtpRxTask(void *param)
 
 void crtpRegisterPortCB(int port, CrtpCallback cb)
 {
-  if (port>CRTP_NBR_OF_PORTS)
+  if (port < 0 || port >= CRTP_NBR_OF_PORTS)
     return;
 
   callbacks[port] = cb;

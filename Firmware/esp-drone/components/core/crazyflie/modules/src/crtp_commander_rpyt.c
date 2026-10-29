@@ -41,6 +41,12 @@
 #define MIN_THRUST  1000
 #define MAX_THRUST  60000
 
+// Throttle curve (same idea as Betaflight's thr_mid/thr_expo), tunable live via params:
+// thrMid  = stick position (0..1) where the curve is flattest; set it to roughly where the drone hovers
+// thrExpo = 0 gives the original linear throttle, 1 gives the flattest response around thrMid
+static float thrMid = 0.5f;
+static float thrExpo = 0.5f;
+
 /**
  * CRTP commander rpyt packet format
  */
@@ -141,6 +147,18 @@ static void rotateYaw(setpoint_t *setpoint, float yawRad)
 /**
  * Update Yaw according to current setting
  */
+static uint16_t applyThrottleCurve(uint16_t rawThrust)
+{
+  float mid = constrain(thrMid, 0.05f, 0.95f);
+  float expo = constrain(thrExpo, 0.0f, 1.0f);
+  float x = (float)(rawThrust - MIN_THRUST) / (float)(UINT16_MAX - MIN_THRUST);
+  float tmp = x - mid;
+  float range = (tmp > 0.0f) ? (1.0f - mid) : mid;
+  float y = mid + tmp * (1.0f - expo + expo * (tmp * tmp) / (range * range));
+
+  return (uint16_t)(MIN_THRUST + y * (MAX_THRUST - MIN_THRUST));
+}
+
 static void yawModeUpdate(setpoint_t *setpoint)
 {
   switch (yawMode)
@@ -176,7 +194,7 @@ void crtpCommanderRpytDecodeSetpoint(setpoint_t *setpoint, CRTPPacket *pk)
   if (thrustLocked || (rawThrust < MIN_THRUST)) {
     setpoint->thrust = 0;
   } else {
-    setpoint->thrust = fminf(rawThrust, MAX_THRUST);
+    setpoint->thrust = applyThrottleCurve(rawThrust);
   }
 
   if (altHoldMode) {
@@ -269,4 +287,6 @@ PARAM_ADD(PARAM_UINT8, yawRst, &carefreeResetFront)
 PARAM_ADD(PARAM_UINT8, stabModeRoll, &stabilizationModeRoll)
 PARAM_ADD(PARAM_UINT8, stabModePitch, &stabilizationModePitch)
 PARAM_ADD(PARAM_UINT8, stabModeYaw, &stabilizationModeYaw)
+PARAM_ADD(PARAM_FLOAT, thrMid, &thrMid)
+PARAM_ADD(PARAM_FLOAT, thrExpo, &thrExpo)
 PARAM_GROUP_STOP(flightmode)

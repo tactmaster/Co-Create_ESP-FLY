@@ -345,19 +345,11 @@ void processAccGyroMeasurements(const uint8_t *buffer)
 
 #ifdef CONFIG_TARGET_ESPLANE_V1
     /* sensors step 2.1 read from buffer */
-    /*
     accelRaw.x = (((int16_t)buffer[0]) << 8) | buffer[1];
     accelRaw.y = (((int16_t)buffer[2]) << 8) | buffer[3];
     accelRaw.z = (((int16_t)buffer[4]) << 8) | buffer[5];
     gyroRaw.x = (((int16_t)buffer[8]) << 8) | buffer[9];
     gyroRaw.y = (((int16_t)buffer[10]) << 8) | buffer[11];
-    gyroRaw.z = (((int16_t)buffer[12]) << 8) | buffer[13];
-    */
-    accelRaw.y = (((int16_t)buffer[0]) << 8) | buffer[1];
-    accelRaw.x = (((int16_t)buffer[2]) << 8) | buffer[3];
-    accelRaw.z = (((int16_t)buffer[4]) << 8) | buffer[5];
-    gyroRaw.y = (((int16_t)buffer[8]) << 8) | buffer[9];
-    gyroRaw.x = (((int16_t)buffer[10]) << 8) | buffer[11];
     gyroRaw.z = (((int16_t)buffer[12]) << 8) | buffer[13];
 #else
     /* sensors step 2.1 read from buffer */
@@ -383,8 +375,7 @@ void processAccGyroMeasurements(const uint8_t *buffer)
 
     /* sensors step 2.4 convert  digtal value to physical angle */
 #ifdef CONFIG_TARGET_ESPLANE_V1
-    //sensorData.gyro.x = (gyroRaw.x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
-    sensorData.gyro.x = -(gyroRaw.x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
+    sensorData.gyro.x = (gyroRaw.x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
 #else
     sensorData.gyro.x = -(gyroRaw.x - gyroBias.x) * SENSORS_DEG_PER_LSB_CFG;
 #endif
@@ -395,8 +386,7 @@ void processAccGyroMeasurements(const uint8_t *buffer)
     applyAxis3fLpf((lpf2pData *)(&gyroLpf), &sensorData.gyro);
 
 #ifdef CONFIG_TARGET_ESPLANE_V1
-    //accScaled.x = (accelRaw.x) * SENSORS_G_PER_LSB_CFG / accScale;
-    accScaled.x = -(accelRaw.x) * SENSORS_G_PER_LSB_CFG / accScale;
+    accScaled.x = (accelRaw.x) * SENSORS_G_PER_LSB_CFG / accScale;
 #else
     accScaled.x = -(accelRaw.x) * SENSORS_G_PER_LSB_CFG / accScale;   
 #endif
@@ -408,7 +398,7 @@ void processAccGyroMeasurements(const uint8_t *buffer)
     sensorsAccAlignToGravity(&accScaled, &sensorData.acc);
     applyAxis3fLpf((lpf2pData *)(&accLpf), &sensorData.acc);
 }
-static void sensorsDeviceInit(void)
+static bool sensorsDeviceInit(void)
 {
     isMagnetometerPresent = false;
     isBarometerPresent = false;
@@ -418,15 +408,28 @@ static void sensorsDeviceInit(void)
         vTaskDelay(M2T(50));
     };
 
-    i2cdevInit(I2C0_DEV);
+    if (!i2cdevInit(I2C0_DEV)) {
+        DEBUG_PRINTE("Sensor I2C bus initialization [FAIL].\n");
+        return false;
+    }
     mpu6050Init(I2C0_DEV);
 
-    if (mpu6050TestConnection() == true) {
+    // The first read after power-up/reset is occasionally corrupt, so retry before giving up
+    bool mpuConnected = false;
+    for (int attempt = 1; attempt <= 5 && !mpuConnected; attempt++) {
+        mpuConnected = mpu6050TestConnection();
+        if (!mpuConnected) {
+            DEBUG_PRINTW("MPU6050 connection attempt %d failed, retrying\n", attempt);
+            vTaskDelay(M2T(20));
+        }
+    }
+
+    if (mpuConnected) {
         DEBUG_PRINTI("MPU6050 I2C connection [OK].\n");
     } else {
         DEBUG_PRINTE("MPU6050 I2C connection [FAIL].\n");
-        // Please check your hardware !
-        assert(0);
+        DEBUG_PRINTE("Critical IMU unavailable; stabilization remains disabled.\n");
+        return false;
     }
 
     mpu6050Reset();
@@ -556,6 +559,7 @@ static void sensorsDeviceInit(void)
     cosRoll = cosf(ROLL_CALIB * (float)M_PI / 180);
     sinRoll = sinf(ROLL_CALIB * (float)M_PI / 180);
     DEBUG_PRINTI("pitch_calib = %f,roll_calib = %f",PITCH_CALIB,ROLL_CALIB);
+    return true;
 }
 
 static void sensorsSetupSlaveRead(void)
@@ -687,7 +691,9 @@ void sensorsMpu6050Hmc5883lMs5611Init(void)
     }
 
     sensorsBiasObjInit(&gyroBiasRunning);
-    sensorsDeviceInit();
+    if (!sensorsDeviceInit()) {
+        return;
+    }
     sensorsInterruptInit();
     sensorsTaskInit();
     isInit = true;
@@ -700,7 +706,7 @@ bool sensorsMpu6050Hmc5883lMs5611Test(void)
 
     if (!isInit) {
         DEBUG_PRINTE("Error while initializing sensor task\r\n");
-        testStatus = false;
+        return false;
     }
 
     // Try for 3 seconds so the quad has stabilized enough to pass the test

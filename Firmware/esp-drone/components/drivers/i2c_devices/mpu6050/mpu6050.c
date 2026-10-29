@@ -77,6 +77,7 @@ bool mpu6050Test(void)
  */
 bool mpu6050TestConnection()
 {
+    vTaskDelay(M2T(100));
     return mpu6050GetDeviceID() == 0b110100;
 }
 
@@ -2143,8 +2144,6 @@ void mpu6050GetMotion9(int16_t *ax, int16_t *ay, int16_t *az, int16_t *gx, int16
  * @see getRotation()
  * @see MPU6050_RA_ACCEL_XOUT_H
  */
- 
-
 void mpu6050GetMotion6(int16_t *ax, int16_t *ay, int16_t *az, int16_t *gx, int16_t *gy, int16_t *gz)
 {
     i2cdevReadReg8(I2Cx, devAddr, MPU6050_RA_ACCEL_XOUT_H, 14, buffer);

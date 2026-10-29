@@ -35,8 +35,7 @@
 #include "param.h"
 #include "debug_cf.h"
 #include "log.h"
-#include  "wifi_esp32.h"
-#include "wifilink.h"
+#include "transport.h"
 #include "platformservice.h"
 #include "crtp_localization_service.h"
 
@@ -45,35 +44,36 @@ static bool isInit;
 void commInit(void)
 {
   if (isInit) {
-    return;}
+    return;
+  }
 
-    /* These functions  are moved to be initialized early so
-     * that DEBUG_PRINTD can be used early */
-    //wifilinkInit();
-    //crtpInit();
-    //consoleInit();
+  /* These functions  are moved to be initialized early so
+    * that DEBUG_PRINTD can be used early */
+  //wifilinkInit();
+  //crtpInit();
+  //consoleInit();
 
-    crtpSetLink(wifilinkGetLink());
-    crtpserviceInit();
-    platformserviceInit();
-    logInit();
-    paramInit();
-    //locSrvInit();
+  crtpSetLink(transportGetLink());
+  crtpserviceInit();
+  platformserviceInit();
+  logInit();
+  paramInit();
+  //locSrvInit();
 
-  //setup CRTP communication channel
   //TODO: check for USB first and prefer USB over radio
+  //setup CRTP communication channel
   //if (usbTest())
   //  crtpSetLink(usbGetLink);
   //else if(radiolinkTest())
   //  crtpSetLink(radiolinkGetLink());
-    isInit = true;
+  isInit = true;
 }
 
 bool commTest(void)
 {
 	bool pass = isInit;
-	pass &= wifilinkTest();
-	DEBUG_PRINTI("wifilinkTest = %d ", pass);
+	pass &= transportTest();
+	DEBUG_PRINTI("transportTest = %d ", pass);
 	pass &= crtpTest();
 	DEBUG_PRINTI("crtpTest = %d ", pass);
 	pass &= crtpserviceTest();
@@ -84,7 +84,5 @@ bool commTest(void)
 	DEBUG_PRINTI("consoleTest = %d ", pass);
 	pass &= paramTest();
 	DEBUG_PRINTI("paramTest = %d ", pass);
-
-    return pass;
+  return pass;
 }
-

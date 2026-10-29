@@ -1,8 +1,11 @@
 #include <string.h>
+#include <stdio.h>
 
 #include "config.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 
 #include "esp_system.h"
 #include "esp_wifi.h"
@@ -11,7 +14,7 @@
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
-#include <lwip/netdb.h>
+#include "lwip/netdb.h"
 
 #include "queuemonitor.h"
 #include "wifi_esp32.h"
@@ -19,33 +22,51 @@
 #define DEBUG_MODULE  "WIFI_UDP"
 #include "debug_cf.h"
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
+#include "esp_mac.h"
+#endif
+#ifdef CONFIG_ESPNOW_CONTROL
+#include "espnow.h"
+#include "espnow_ctrl.h"
+#include "espnow_utils.h"
+#endif
+
 #define UDP_SERVER_PORT         2390
-#define UDP_SERVER_BUFSIZE      128
+#define UDP_SERVER_BUFSIZE      64
 
-static struct sockaddr_in6 source_addr; // Large enough for both IPv4 or IPv6
+static struct sockaddr_storage source_addr;
 
-//#define WIFI_SSID      "Udp Server"
-static char WIFI_SSID[32] = "ESP-DRONE";
-static char WIFI_PWD[64] = "12345678" ;
-static uint8_t WIFI_CH = 1;
-#define MAX_STA_CONN (3)
+static char WIFI_SSID[32] = "";
+static const char WIFI_PWD[] = CONFIG_WIFI_PASSWORD;
+static uint8_t WIFI_CH = CONFIG_WIFI_CHANNEL;
+#define WIFI_MAX_STA_CONN CONFIG_WIFI_MAX_STA_CONN
+
+// Optional: join an existing Wi-Fi network instead of creating the drone's own AP.
+// Put WIFI_STA_SSID / WIFI_STA_PASSWORD in include/wifi_sta_credentials.h (not tracked by git).
+// If the file is missing or the network can't be joined, the drone falls back to its own AP.
+#if __has_include("wifi_sta_credentials.h")
+#include "wifi_sta_credentials.h"
+#endif
+#ifndef WIFI_STA_SSID
+#define WIFI_STA_SSID ""
+#endif
+#ifndef WIFI_STA_PASSWORD
+#define WIFI_STA_PASSWORD ""
+#endif
+#define WIFI_STA_CONNECT_TIMEOUT_MS 15000
+#define WIFI_STA_GOT_IP_BIT BIT0
+
+static EventGroupHandle_t wifiEventGroup;
+static bool isStaMode = false;
 
 #ifndef MAC2STR
 #define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
 #define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
 #endif
 
-static char rx_buffer[UDP_SERVER_BUFSIZE];
-static char tx_buffer[UDP_SERVER_BUFSIZE];
-const int addr_family = (int)AF_INET;
-const int ip_protocol = IPPROTO_IP;
-static struct sockaddr_in dest_addr;
 static int sock;
-
 static xQueueHandle udpDataRx;
 static xQueueHandle udpDataTx;
-static UDPPacket inPacket;
-static UDPPacket outPacket;
 
 static bool isInit = false;
 static bool isUDPInit = false;
@@ -69,182 +90,101 @@ static uint8_t calculate_cksum(void *data, size_t len)
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
-    if (event_id == WIFI_EVENT_AP_STACONNECTED) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *) event_data;
         DEBUG_PRINT_LOCAL("station" MACSTR "join, AID=%d", MAC2STR(event->mac), event->aid);
 
-    } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *) event_data;
         DEBUG_PRINT_LOCAL("station" MACSTR "leave, AID=%d", MAC2STR(event->mac), event->aid);
-    } 
-}
 
-bool wifiTest(void)
-{
-    return isInit;
-};
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
 
-bool wifiGetDataBlocking(UDPPacket *in)
-{
-    /* command step - receive  02  from udp rx queue */
-    while (xQueueReceive(udpDataRx, in, portMAX_DELAY) != pdTRUE) {
-        vTaskDelay(1);
-    }; // Don't return until we get some data on the UDP
-
-    return true;
-};
-
-bool wifiSendData(uint32_t size, uint8_t *data)
-{
-    static UDPPacket outStage;
-    outStage.size = size;
-    memcpy(outStage.data, data, size);
-    // Dont' block when sending
-    return (xQueueSend(udpDataTx, &outStage, M2T(100)) == pdTRUE);
-};
-
-static esp_err_t udp_server_create(void *arg)
-{ 
-    if (isUDPInit){
-        return ESP_OK;
-    }
-    
-    struct sockaddr_in *pdest_addr = &dest_addr;
-    pdest_addr->sin_addr.s_addr = htonl(INADDR_ANY);
-    pdest_addr->sin_family = AF_INET;
-    pdest_addr->sin_port = htons(UDP_SERVER_PORT);
-
-    sock = socket(addr_family, SOCK_DGRAM, ip_protocol);
-    if (sock < 0) {
-        DEBUG_PRINT_LOCAL("Unable to create socket: errno %d", errno);
-        return ESP_FAIL;
-    }
-    DEBUG_PRINT_LOCAL("Socket created");
-
-    int err = bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err < 0) {
-        DEBUG_PRINT_LOCAL("Socket unable to bind: errno %d", errno);
-    }
-    DEBUG_PRINT_LOCAL("Socket bound, port %d", UDP_SERVER_PORT);
-
-    isUDPInit = true;
-    return ESP_OK;
-}
-
-static void udp_server_rx_task(void *pvParameters)
-{
-    uint8_t cksum = 0;
-    socklen_t socklen = sizeof(source_addr);
-    
-    while (true) {
-        if(isUDPInit == false) {
-            vTaskDelay(20);
-            continue;
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *) event_data;
+        xEventGroupClearBits(wifiEventGroup, WIFI_STA_GOT_IP_BIT);
+        if (isStaMode) {
+            DEBUG_PRINT_LOCAL("lost connection to %s (reason %d), reconnecting", WIFI_STA_SSID, event->reason);
+            esp_wifi_connect();
         }
-        int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
-        /* command step - receive  01 from Wi-Fi UDP */
-        if (len < 0) {
-            DEBUG_PRINT_LOCAL("recvfrom failed: errno %d", errno);
-            break;
-        } else if(len > WIFI_RX_TX_PACKET_SIZE - 4) {
-            DEBUG_PRINT_LOCAL("Received data length = %d > 64", len);
-        } else {
-            //copy part of the UDP packet
-            rx_buffer[len] = 0;// Null-terminate whatever we received and treat like a string...
-            memcpy(inPacket.data, rx_buffer, len);
-            cksum = inPacket.data[len - 1];
-            //remove cksum, do not belong to CRTP
-            inPacket.size = len - 1;
-            //check packet
-            if (cksum == calculate_cksum(inPacket.data, len - 1) && inPacket.size < 64){
-                xQueueSend(udpDataRx, &inPacket, M2T(2));
-                if(!isUDPConnected) isUDPConnected = true;
-            }else{
-                DEBUG_PRINT_LOCAL("udp packet cksum unmatched");
-            }
 
-#ifdef DEBUG_UDP
-            DEBUG_PRINT_LOCAL("1.Received data size = %d  %02X \n cksum = %02X", len, inPacket.data[0], cksum);
-            for (size_t i = 0; i < len; i++) {
-                DEBUG_PRINT_LOCAL(" data[%d] = %02X ", i, inPacket.data[i]);
-            }
-#endif
-        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+        DEBUG_PRINT_LOCAL("joined %s, drone IP is " IPSTR " (UDP port %d)", WIFI_STA_SSID,
+                          IP2STR(&event->ip_info.ip), UDP_SERVER_PORT);
+        xEventGroupSetBits(wifiEventGroup, WIFI_STA_GOT_IP_BIT);
     }
 }
 
-static void udp_server_tx_task(void *pvParameters)
+static bool wifi_start_sta(void)
 {
- 
-    while (TRUE) {
-        if(isUDPInit == false) {
-            vTaskDelay(20);
-            continue;
-        }
-        if ((xQueueReceive(udpDataTx, &outPacket, 5) == pdTRUE) && isUDPConnected) {           
-            memcpy(tx_buffer, outPacket.data, outPacket.size);       
-            tx_buffer[outPacket.size] =  calculate_cksum(tx_buffer, outPacket.size);
-            tx_buffer[outPacket.size + 1] = 0;
-
-            int err = sendto(sock, tx_buffer, outPacket.size + 1, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
-            if (err < 0) {
-                DEBUG_PRINT_LOCAL("Error occurred during sending: errno %d", errno);
-                continue;
-            }
-#ifdef DEBUG_UDP
-            DEBUG_PRINT_LOCAL("Send data to");
-            for (size_t i = 0; i < outPacket.size + 1; i++) {
-                DEBUG_PRINT_LOCAL(" data_send[%d] = %02X ", i, tx_buffer[i]);
-            }
-#endif
-        }    
+    if (strlen(WIFI_STA_SSID) == 0) {
+        return false;
     }
+
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+
+    wifi_config_t wifi_config = {0};
+    strncpy((char *)wifi_config.sta.ssid, WIFI_STA_SSID, sizeof(wifi_config.sta.ssid));
+    strncpy((char *)wifi_config.sta.password, WIFI_STA_PASSWORD, sizeof(wifi_config.sta.password));
+
+    isStaMode = true;
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    // Modem sleep adds tens of ms of latency to control packets
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    DEBUG_PRINT_LOCAL("connecting to %s ...", WIFI_STA_SSID);
+    EventBits_t bits = xEventGroupWaitBits(wifiEventGroup, WIFI_STA_GOT_IP_BIT, pdFALSE, pdTRUE,
+                                           M2T(WIFI_STA_CONNECT_TIMEOUT_MS));
+    if (bits & WIFI_STA_GOT_IP_BIT) {
+        return true;
+    }
+
+    DEBUG_PRINT_LOCAL("could not join %s, falling back to the drone's own AP", WIFI_STA_SSID);
+    isStaMode = false;
+    esp_wifi_disconnect();
+    ESP_ERROR_CHECK(esp_wifi_stop());
+    esp_netif_destroy_default_wifi(sta_netif);
+    return false;
 }
 
-
-void wifiInit(void)
+static bool wifi_start_softap(void)
 {
-    if (isInit) {
-        return;
-    }
-
-    esp_netif_t *ap_netif = NULL;
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ap_netif = esp_netif_create_default_wifi_ap();
+    const size_t password_len = strlen(WIFI_PWD);
+    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
     uint8_t mac[6];
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                    ESP_EVENT_ANY_ID,
-                    &wifi_event_handler,
-                    NULL,
-                    NULL));
-
-    ESP_ERROR_CHECK(esp_wifi_get_mac(ESP_IF_WIFI_AP, mac));
-    sprintf(WIFI_SSID, "ESP-DRONE_%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_AP, mac));
+    int ssid_len = snprintf(WIFI_SSID, sizeof(WIFI_SSID), "%s_%02X%02X%02X%02X%02X%02X",
+                            CONFIG_WIFI_BASE_SSID, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    if (ssid_len < 1 || (size_t)ssid_len >= sizeof(WIFI_SSID)) {
+        DEBUG_PRINT_LOCAL("Wi-Fi SSID is too long");
+        return false;
+    }
 
     wifi_config_t wifi_config = {
         .ap = {
             .channel = WIFI_CH,
-            .max_connection = MAX_STA_CONN,
+            .max_connection = WIFI_MAX_STA_CONN,
             .authmode = WIFI_AUTH_WPA_WPA2_PSK,
         },
     };
 
-    memcpy(wifi_config.ap.ssid, WIFI_SSID, strlen(WIFI_SSID) + 1) ;
-    wifi_config.ap.ssid_len = strlen(WIFI_SSID);
-    memcpy(wifi_config.ap.password, WIFI_PWD, strlen(WIFI_PWD) + 1) ;
+    memcpy(wifi_config.ap.ssid, WIFI_SSID, (size_t)ssid_len + 1);
+    wifi_config.ap.ssid_len = ssid_len;
+    memcpy(wifi_config.ap.password, WIFI_PWD, password_len + 1);
 
     if (strlen(WIFI_PWD) == 0) {
         wifi_config.ap.authmode = WIFI_AUTH_OPEN;
     }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    esp_wifi_set_channel(WIFI_CH, WIFI_SECOND_CHAN_NONE);
 
     esp_netif_ip_info_t ip_info = {
         .ip.addr = ipaddr_addr("192.168.43.42"),
@@ -254,19 +194,271 @@ void wifiInit(void)
     ESP_ERROR_CHECK(esp_netif_dhcps_stop(ap_netif));
     ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ip_info));
     ESP_ERROR_CHECK(esp_netif_dhcps_start(ap_netif));
-
     DEBUG_PRINT_LOCAL("wifi_init_softap complete.SSID:%s password:%s", WIFI_SSID, WIFI_PWD);
+    return true;
+}
+
+bool wifiTest(void)
+{
+    return isInit;
+};
+
+bool wifiGetDataBlocking(UDPPacket *in)
+{
+    if (in == NULL || udpDataRx == NULL) {
+        return false;
+    }
+
+    /* command step - receive  02  from udp rx queue */
+    while (xQueueReceive(udpDataRx, in, portMAX_DELAY) != pdTRUE) {
+        vTaskDelay(M2T(10));
+    }; // Don't return until we get some data on the UDP
+
+    return true;
+};
+
+bool wifiSendData(uint32_t size, uint8_t *data)
+{
+    if (data == NULL || size == 0 || size > WIFI_MAX_PAYLOAD_SIZE || udpDataTx == NULL) {
+        return false;
+    }
+
+    UDPPacket outStage = {0};
+    outStage.size = size;
+    memcpy(outStage.data, data, size);
+    // Dont' block when sending
+    return (xQueueSend(udpDataTx, &outStage, M2T(100)) == pdTRUE);
+};
+
+static esp_err_t udp_server_create(void *arg)
+{
+    if (isUDPInit){
+        return ESP_OK;
+    }
+
+    static struct sockaddr_in dest_addr = {0};
+    dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(UDP_SERVER_PORT);
+
+    sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        DEBUG_PRINT_LOCAL("Unable to create socket: errno %d", errno);
+        return ESP_FAIL;
+    }
+    DEBUG_PRINT_LOCAL("Socket created");
+
+    int err = bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err < 0) {
+        DEBUG_PRINT_LOCAL("Socket unable to bind: errno %d", errno);
+        close(sock);
+        sock = -1;
+        return ESP_FAIL;
+    }
+    DEBUG_PRINT_LOCAL("Socket bound, port %d", UDP_SERVER_PORT);
+
+    isUDPInit = true;
+    return ESP_OK;
+}
+
+static void udp_server_rx_task(void *pvParameters)
+{
+    socklen_t socklen = sizeof(source_addr);
+    char rx_buffer[UDP_SERVER_BUFSIZE];
+    UDPPacket inPacket = {0};
+
+    while (true) {
+        if(isUDPInit == false) {
+            vTaskDelay(20);
+            continue;
+        }
+        int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer), 0, (struct sockaddr *)&source_addr, &socklen);
+        /* command step - receive  01 from Wi-Fi UDP */
+        if (len < 0) {
+            DEBUG_PRINT_LOCAL("recvfrom failed: errno %d", errno);
+            continue;
+        } else if (len < 2 || len > WIFI_RX_TX_PACKET_SIZE) {
+            DEBUG_PRINT_LOCAL("Invalid UDP frame length: %d", len);
+            continue;
+        } else {
+            uint8_t cksum = rx_buffer[len - 1];
+            //remove cksum, do not belong to CRTP
+            //check packet
+            if (cksum == calculate_cksum(rx_buffer, len - 1)) {
+                //copy part of the UDP packet, the size not include cksum
+                inPacket.size = len - 1;
+                memcpy(inPacket.data, rx_buffer, inPacket.size);
+                xQueueSend(udpDataRx, &inPacket, M2T(10));
+                if(!isUDPConnected) isUDPConnected = true;
+            }else{
+                DEBUG_PRINT_LOCAL("udp packet cksum unmatched");
+            }
+
+#ifdef DEBUG_UDP
+            printf("\nReceived size = %d cksum = %02X\n", inPacket.size, cksum);
+            for (size_t i = 0; i < inPacket.size; i++) {
+                printf("%02X ", inPacket.data[i]);
+            }
+            printf("\n");
+#endif
+        }
+    }
+}
+
+static void udp_server_tx_task(void *pvParameters)
+{
+    UDPPacket outPacket = {0};
+    while (TRUE) {
+        if(isUDPInit == false) {
+            vTaskDelay(20);
+            continue;
+        }
+        if ((xQueueReceive(udpDataTx, &outPacket, portMAX_DELAY) == pdTRUE) && isUDPConnected) {
+            if (outPacket.size == 0 || outPacket.size > WIFI_MAX_PAYLOAD_SIZE) {
+                DEBUG_PRINT_LOCAL("Invalid UDP payload length: %u", outPacket.size);
+                continue;
+            }
+            // append cksum to the packet
+            outPacket.data[outPacket.size] = calculate_cksum(outPacket.data, outPacket.size);
+            outPacket.size += 1;
+
+            int err = sendto(sock, outPacket.data, outPacket.size, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
+            if (err < 0) {
+                DEBUG_PRINT_LOCAL("Error occurred during sending: errno %d", errno);
+                continue;
+            }
+#ifdef DEBUG_UDP
+            printf("\nSend size = %d checksum = %02X\n", outPacket.size, outPacket.data[outPacket.size - 1]);
+            for (size_t i = 0; i < outPacket.size; i++) {
+                printf("%02X ", outPacket.data[i]);
+            }
+            printf("\n");
+#endif
+        }
+    }
+}
+
+#ifdef CONFIG_ESPNOW_CONTROL
+static void espnow_ctrl_data_cb(espnow_attribute_t initiator_attribute,
+                                       espnow_attribute_t responder_attribute,
+                                       uint32_t status1,
+                                       int status2,
+                                       int lx_value,
+                                       int ly_value,
+                                       int rx_value,
+                                       int ry_value,
+                                       int channel_one_value,
+                                       int channel_two_value)
+{
+    UDPPacket inPacket;
+    inPacket.size = 7;
+    inPacket.data[0] = 'n';
+    inPacket.data[1] = 'o';
+    inPacket.data[2] = 'w';
+    inPacket.data[3] = lx_value & 0xFF;
+    inPacket.data[4] = ly_value & 0xFF;
+    inPacket.data[5] = ry_value & 0xFF;
+    inPacket.data[6] = rx_value & 0xFF;
+    xQueueSend(udpDataRx, &inPacket, 0);
+}
+
+static void app_espnow_event_handler(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
+{
+    if (base != ESP_EVENT_ESPNOW) {
+        return;
+    }
+
+    switch (id) {
+    case ESP_EVENT_ESPNOW_CTRL_BIND: {
+        espnow_ctrl_bind_info_t *info = (espnow_ctrl_bind_info_t *)event_data;
+        DEBUG_PRINT_LOCAL("bind, uuid: " MACSTR ", initiator_type: %d", MAC2STR(info->mac), info->initiator_attribute);
+        break;
+    }
+
+    case ESP_EVENT_ESPNOW_CTRL_UNBIND: {
+        espnow_ctrl_bind_info_t *info = (espnow_ctrl_bind_info_t *)event_data;
+        DEBUG_PRINT_LOCAL("unbind, uuid: " MACSTR ", initiator_type: %d", MAC2STR(info->mac), info->initiator_attribute);
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+#endif
+
+void wifiInit(void)
+{
+    if (isInit) {
+        return;
+    }
+    const size_t password_len = strlen(WIFI_PWD);
+    const size_t base_ssid_len = strlen(CONFIG_WIFI_BASE_SSID);
+    if (base_ssid_len == 0 || base_ssid_len > 16) {
+        DEBUG_PRINT_LOCAL("Wi-Fi base SSID must be 1-16 characters");
+        return;
+    }
+    if (password_len != 0 && (password_len < 8 || password_len > 63)) {
+        DEBUG_PRINT_LOCAL("Wi-Fi password must be empty or 8-63 characters");
+        return;
+    }
 
     // This should probably be reduced to a CRTP packet size
-    udpDataRx = xQueueCreate(5, sizeof(UDPPacket)); /* Buffer packets (max 64 bytes) */
+    udpDataRx = xQueueCreate(16, sizeof(UDPPacket));
+    udpDataTx = xQueueCreate(16, sizeof(UDPPacket));
+    if (udpDataRx == NULL || udpDataTx == NULL) {
+        if (udpDataRx != NULL) {
+            vQueueDelete(udpDataRx);
+            udpDataRx = NULL;
+        }
+        if (udpDataTx != NULL) {
+            vQueueDelete(udpDataTx);
+            udpDataTx = NULL;
+        }
+        DEBUG_PRINT_LOCAL("Unable to allocate Wi-Fi queues");
+        return;
+    }
     DEBUG_QUEUE_MONITOR_REGISTER(udpDataRx);
-    udpDataTx = xQueueCreate(5, sizeof(UDPPacket)); /* Buffer packets (max 64 bytes) */
     DEBUG_QUEUE_MONITOR_REGISTER(udpDataTx);
+
+#ifdef CONFIG_ESPNOW_CONTROL
+    espnow_storage_init();
+#endif
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    wifiEventGroup = xEventGroupCreate();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                    ESP_EVENT_ANY_ID,
+                    &wifi_event_handler,
+                    NULL,
+                    NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                    IP_EVENT_STA_GOT_IP,
+                    &wifi_event_handler,
+                    NULL,
+                    NULL));
+
+    // In STA mode the radio follows the router's channel, so ESP-NOW peers must use that channel too
+    if (!wifi_start_sta() && !wifi_start_softap()) {
+        return;
+    }
+#ifdef CONFIG_ESPNOW_CONTROL
+    espnow_config_t espnow_config = ESPNOW_INIT_CONFIG_DEFAULT();
+    espnow_init(&espnow_config);
+    esp_event_handler_register(ESP_EVENT_ESPNOW, ESP_EVENT_ANY_ID, app_espnow_event_handler, NULL);
+    ESP_ERROR_CHECK(espnow_ctrl_responder_bind(30 * 1000, -55, NULL));
+    espnow_ctrl_responder_data(espnow_ctrl_data_cb);
+#endif
+
     if (udp_server_create(NULL) == ESP_FAIL) {
-        DEBUG_PRINT_LOCAL("UDP server create socket failed!!!");
+        DEBUG_PRINT_LOCAL("UDP server create socket failed");
     } else {
-        DEBUG_PRINT_LOCAL("UDP server create socket succeed!!!");
-    } 
+        DEBUG_PRINT_LOCAL("UDP server create socket succeed");
+    }
     xTaskCreate(udp_server_tx_task, UDP_TX_TASK_NAME, UDP_TX_TASK_STACKSIZE, NULL, UDP_TX_TASK_PRI, NULL);
     xTaskCreate(udp_server_rx_task, UDP_RX_TASK_NAME, UDP_RX_TASK_STACKSIZE, NULL, UDP_RX_TASK_PRI, NULL);
     isInit = true;

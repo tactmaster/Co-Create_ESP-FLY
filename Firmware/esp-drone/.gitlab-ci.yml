@@ -1,0 +1,95 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  ESP_DRONE_PATH: "$CI_PROJECT_DIR"
+
+before_script:
+  # add gitlab ssh key
+  - mkdir -p ~/.ssh
+  - chmod 700 ~/.ssh
+  - echo -n $GITLAB_KEY > ~/.ssh/id_rsa_base64
+  - base64 --decode --ignore-garbage ~/.ssh/id_rsa_base64 > ~/.ssh/id_rsa
+  - chmod 600 ~/.ssh/id_rsa
+  - echo -e "Host gitlab.espressif.cn\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
+  - git --version
+  - git submodule update --init --recursive --force
+
+.build_examples_template: &build_examples_template
+  stage: build
+  tags:
+    - build
+
+build_project_idf55:
+  <<: *build_examples_template
+  image: espressif/idf:release-v5.5
+  script:
+    - for target in esp32 esp32s2 esp32s3 esp32p4; do idf.py -B "build-${target}" -D "IDF_TARGET=${target}" build || exit 1; done
+
+build_project_idf61:
+  <<: *build_examples_template
+  image: espressif/idf:release-v6.1
+  script:
+    - for target in esp32 esp32s2 esp32s3 esp32p4; do idf.py -B "build-${target}" -D "IDF_TARGET=${target}" build || exit 1; done
+    - idf.py --preview -B build-esp32s31 -D IDF_TARGET=esp32s31 build
+
+build_docs:
+    stage: build
+    image: $CI_SPHINX_DOCKER:latest
+    tags:
+        - build_docs
+    artifacts:
+        when: always
+        paths:
+            # English version of documentation
+            - docs/en/rst/sphinx-warning-log.txt
+            - docs/en/rst/_build/html
+            # Chinese version of documentation
+            - docs/zh_CN/rst/sphinx-warning-log.txt
+            - docs/zh_CN/rst/_build/html
+        expire_in: 1 week
+    before_script:
+      - echo "skip default before_script"
+    script:
+      - cd docs
+      # make English version of documentation
+      - cd en/
+      - cd rst/
+      - make clean && make html
+      - cd ../../
+      # make Chinese version of documentation
+      - cd zh_CN/
+      - cd rst/
+      - make clean && make html
+      - cd ../../
+
+push_master_to_github:
+  stage: deploy
+  only:
+    - master
+#  when: on_success
+  image: $CI_SPHINX_DOCKER:latest
+  tags:
+    - github_sync
+  variables:
+    GIT_STRATEGY: clone
+    SUBMODULES_TO_FETCH: "none"
+  dependencies: []
+  before_script:
+    - echo "skip default before_script"
+  script:
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo -n $GH_PUSH_KEY > ~/.ssh/id_rsa_base64
+    - base64 --decode --ignore-garbage ~/.ssh/id_rsa_base64 > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - echo -e "Host github.com\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
+    - git remote remove github &>/dev/null || true
+    - git remote add github git@github.com:espressif/esp-drone.git
+    - |
+      if [ -n "${CI_COMMIT_TAG}" ]; then
+        git push github "${CI_COMMIT_TAG}"
+      else
+        git push github "${CI_COMMIT_SHA}:refs/heads/${CI_COMMIT_REF_NAME}"
+      fi
