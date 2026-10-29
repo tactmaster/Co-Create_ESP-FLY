@@ -37,6 +37,9 @@
 #include "param.h"
 #include "stm32_legacy.h"
 #include "static_mem.h"
+#include "system.h"
+#define DEBUG_MODULE "CMDR"
+#include "debug_cf.h"
 
 static bool isInit;
 const static setpoint_t nullSetpoint;
@@ -46,6 +49,7 @@ const static int priorityDisable = COMMANDER_PRIORITY_DISABLE;
 
 static uint32_t lastUpdate;
 static bool enableHighLevel = false;
+static bool autoArmed = false;
 
 static QueueHandle_t setpointQueue;
 STATIC_MEM_QUEUE_ALLOC(setpointQueue, 1, sizeof(setpoint_t));
@@ -78,6 +82,13 @@ void commanderSetSetpoint(setpoint_t *setpoint, int priority)
   ASSERT(peekResult == pdTRUE);
 
   if (priority >= currentPriority) {
+    // Auto-arm: a controller is sending setpoints and its throttle is at zero.
+    // Disarming happens in commanderGetSetpoint() when the setpoints stop.
+    if (!autoArmed && setpoint->thrust == 0) {
+      autoArmed = true;
+      systemSetArmed(true);
+      DEBUG_PRINTI("Armed (controller connected, throttle at zero)\n");
+    }
     setpoint->timestamp = xTaskGetTickCount();
     // This is a potential race but without effect on functionality
     xQueueOverwrite(setpointQueue, setpoint);
@@ -113,6 +124,12 @@ void commanderGetSetpoint(setpoint_t *setpoint, const state_t *state)
     }
     if (!enableHighLevel || crtpCommanderHighLevelIsStopped()) {
       memcpy(setpoint, &nullSetpoint, sizeof(nullSetpoint));
+      // Controller lost: disarm, so it must send zero throttle again before the motors can run
+      if (autoArmed) {
+        autoArmed = false;
+        systemSetArmed(false);
+        DEBUG_PRINTW("Disarmed (no setpoints for 2 s)\n");
+      }
     }
   } else if ((currentTime - setpoint->timestamp) > COMMANDER_WDT_TIMEOUT_STABILIZE) {
     xQueueOverwrite(priorityQueue, &priorityDisable);
