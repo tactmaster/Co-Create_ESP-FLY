@@ -29,3 +29,12 @@ CONFIG_BUZ1_PIN_POS=39
 CONFIG_BUZ2_PIN_NEG=38
 # XIAO ESP32-S3: logs over the native USB port as well as UART0
 CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# Mender OTA: A/B app slots, roll back to the previous firmware if a new one never checks in
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_mender.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_MENDER_SERVER_HOST_EU=y
+CONFIG_MENDER_DEVICE_TYPE="esp-fly"
+# Artifacts are built separately with mender-artifact (see README)
+CONFIG_MENDER_ARTIFACT_GENERATE=n

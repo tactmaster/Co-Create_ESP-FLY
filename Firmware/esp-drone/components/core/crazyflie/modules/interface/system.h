@@ -42,5 +42,7 @@ void systemSetCanFly(bool val);
 bool systemCanFly(void);
 void systemSetArmed(bool val);
 bool systemIsArmed();
+void systemSetArmingBlocked(bool val);
+bool systemIsArmingBlocked(void);
 
 #endif //__SYSTEM_H__

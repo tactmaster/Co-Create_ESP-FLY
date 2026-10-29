@@ -84,7 +84,8 @@ void commanderSetSetpoint(setpoint_t *setpoint, int priority)
   if (priority >= currentPriority) {
     // Auto-arm: a controller is sending setpoints and its throttle is at zero.
     // Disarming happens in commanderGetSetpoint() when the setpoints stop.
-    if (!autoArmed && setpoint->thrust == 0) {
+    // Arming is refused while blocked, e.g. while an OTA update is being written.
+    if (!autoArmed && setpoint->thrust == 0 && !systemIsArmingBlocked()) {
       autoArmed = true;
       systemSetArmed(true);
       DEBUG_PRINTI("Armed (controller connected, throttle at zero)\n");

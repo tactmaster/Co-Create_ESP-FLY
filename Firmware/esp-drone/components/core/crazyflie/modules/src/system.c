@@ -78,6 +78,8 @@ static bool canFly;
 /* Motors must remain inhibited until an explicit runtime arm command. */
 static bool armed = false;
 static bool forceArm;
+/* Set while something (e.g. an OTA update) must not be interrupted by flight */
+static volatile bool armingBlocked;
 static bool isInit;
 
 STATIC_MEM_TASK_ALLOC(systemTask, SYSTEM_TASK_STACKSIZE);
@@ -329,6 +331,16 @@ bool systemCanFly(void)
 void systemSetArmed(bool val)
 {
   armed = val;
+}
+
+void systemSetArmingBlocked(bool val)
+{
+  armingBlocked = val;
+}
+
+bool systemIsArmingBlocked(void)
+{
+  return armingBlocked;
 }
 
 bool systemIsArmed()

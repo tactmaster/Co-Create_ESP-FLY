@@ -1,0 +1,9 @@
+# ESP-FLY (8 MB flash) layout with A/B app slots for Mender OTA updates.
+# nvs keeps the same offset and size as the default single-app layout, so saved settings survive.
+# Name,      Type, SubType,   Offset,  Size
+nvs,         data, nvs,       0x9000,  24K
+otadata,     data, ota,       ,        8K
+mender,      data, nvs,       ,        32K
+mender_logs, data, undefined, ,        8K
+ota_0,       app,  ota_0,     0x20000, 3M
+ota_1,       app,  ota_1,     ,        3M

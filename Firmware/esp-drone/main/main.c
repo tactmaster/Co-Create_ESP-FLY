@@ -30,6 +30,7 @@
 #include "stm32_legacy.h"
 #include "platform.h"
 #include "system.h"
+#include "mender_ota.h"
 #define DEBUG_MODULE "APP_MAIN"
 #include "debug_cf.h"
 
@@ -57,5 +58,8 @@ void app_main()
 
     /*launch the system task */
     systemLaunch();
+
+    /* OTA updates via Mender, once the drone is on a home network */
+    menderOtaStart();
 
 }

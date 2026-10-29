@@ -1,0 +1,7 @@
+dependencies:
+  # Mender OTA client; it needs ESP-IDF >= 6.0, older builds just leave Mender out
+  mender-mcu:
+    git: https://github.com/mendersoftware/mender-mcu.git
+    version: a50991f4fa16d94b006fec9a93472a87804b27a2
+    rules:
+      - if: "idf_version >=6.0"

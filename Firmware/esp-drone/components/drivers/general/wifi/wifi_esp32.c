@@ -203,6 +203,12 @@ bool wifiTest(void)
     return isInit;
 };
 
+bool wifiStaIsConnected(void)
+{
+    return wifiEventGroup != NULL && isStaMode &&
+           (xEventGroupGetBits(wifiEventGroup) & WIFI_STA_GOT_IP_BIT);
+}
+
 bool wifiGetDataBlocking(UDPPacket *in)
 {
     if (in == NULL || udpDataRx == NULL) {

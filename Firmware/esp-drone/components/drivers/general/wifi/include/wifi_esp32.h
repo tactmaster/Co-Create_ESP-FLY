@@ -28,6 +28,9 @@ void wifiInit(void);
  */
 bool wifiTest(void);
 
+// True when joined to a home network (station mode) and holding an IP address
+bool wifiStaIsConnected(void);
+
 /**
  * Get CRTP link data structure
  *
