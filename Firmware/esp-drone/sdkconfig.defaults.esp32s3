@@ -38,3 +38,7 @@ CONFIG_MENDER_SERVER_HOST_EU=y
 CONFIG_MENDER_DEVICE_TYPE="esp-fly"
 # Artifacts are built separately with mender-artifact (see README)
 CONFIG_MENDER_ARTIFACT_GENERATE=n
+# Spin each motor briefly after calibration, like the original Seeed firmware
+CONFIG_MOTORS_STARTUP_TEST=y
+# Check Mender for updates every 5 minutes (default is once a week, i.e. only at boot)
+CONFIG_MENDER_CLIENT_UPDATE_POLL_INTERVAL=300

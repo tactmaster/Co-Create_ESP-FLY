@@ -3,3 +3,6 @@ Firmware/esp-drone/sdkconfig.old
 Firmware/esp-drone/managed_components/
 Firmware/esp-drone/components/drivers/general/wifi/include/wifi_sta_credentials.h
 Firmware/esp-drone/main/mender_credentials.h
+
+# Local secrets (Mender PAT etc.)
+.env
